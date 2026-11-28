@@ -59,6 +59,31 @@ export interface PaymentRequest {
   closingSince?: string;
 }
 
+/**
+ * A saved-card charge's status (PAY-4). `charging` while the adapter has not answered; `paid` when
+ * the provider charged the card; `declined` when it certainly did not; `not_sent` when the engine
+ * never sent it (its 60 seconds ran out first); `unknown` when its answer was lost or unreadable, or
+ * the call ended before it came: do not assume either.
+ */
+export type SavedCardChargeStatus = "charging" | "paid" | "declined" | "not_sent" | "unknown";
+
+/** A charge of the card the business already holds for the subject, as the call keeps it. Never card data. */
+export interface SavedCardCharge {
+  paymentId: string;
+  amountMinor: number;
+  currency: string;
+  description: string;
+  amountSource: AmountSourceKind;
+  mode: PaymentMode;
+  /** The business's account at the provider, in `connect` mode; null in `platform` mode. */
+  connectedAccountId: string | null;
+  status: SavedCardChargeStatus;
+  /** The provider's id for the charge, once it said `charged`; null otherwise. */
+  providerRef: string | null;
+  requestedAt: string;
+  settledAt: string | null;
+}
+
 /** Whose account takes the money, per flow step. */
 export const PAYMENT_MODES: readonly PaymentMode[] = ["connect", "platform"];
 

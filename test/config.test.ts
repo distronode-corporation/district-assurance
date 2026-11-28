@@ -378,6 +378,28 @@ describe("validateConfig: modules", () => {
     assert.deepEqual(at({ maxAmountMinor: 1_000_000 }), []);
   });
 
+  it("checks the saved-card charges switch: a boolean, off by default, the savedCards adapter and its modes when on", () => {
+    const at = (settings: unknown, adapters = ALL_ADAPTERS, capabilities?: Record<string, unknown>) =>
+      validateConfig(config((c) => (c.modules.paylink.settings = settings)), new ModuleRegistry({ adapters, modules: builtInModules(), ...(capabilities === undefined ? {} : { capabilities }) }));
+    const withCards = [...ALL_ADAPTERS, "savedCards"];
+    for (const bad of ["yes", 1, null, {}]) assert.deepEqual(at({ savedCardCharges: bad }), ["modules.paylink.settings: savedCardCharges must be true or false"]);
+    // Off, or left out: no adapter needed, and whatever a savedCards adapter declares is not looked at.
+    assert.deepEqual(at({ savedCardCharges: false }, ALL_ADAPTERS, { savedCards: "anything" }), []);
+    assert.deepEqual(at({}, ALL_ADAPTERS, { savedCards: "anything" }), []);
+    assert.deepEqual(at({ savedCardCharges: true }), ["modules.paylink: needs the savedCards adapter, which the engine does not have"]);
+    assert.deepEqual(at({ savedCardCharges: true }, withCards), [], "a registry that knows no capabilities skips the check");
+    assert.deepEqual(at({ savedCardCharges: true }, withCards, { savedCards: { modes: ["platform"] } }), []);
+    for (const caps of [undefined, null, {}, { modes: "platform" }, { modes: ["cash"] }]) {
+      assert.deepEqual(at({ savedCardCharges: true }, withCards, { savedCards: caps }), ["modules.paylink: the savedCards adapter's capabilities must be { modes }, each connect or platform"], JSON.stringify(caps));
+    }
+    assert.deepEqual(at({ savedCardCharges: true }, withCards, { savedCards: { modes: ["connect"] } }), ["modules.paylink: the savedCards adapter does not charge in platform mode (it charges in: connect)"]);
+    assert.deepEqual(at({ savedCardCharges: true, mode: "connect", connectedAccountId: "acct_1" }, withCards, { savedCards: { modes: [] } }), [
+      "modules.paylink: the savedCards adapter does not charge in connect mode (it charges in: none)",
+    ]);
+    const coded = configProblems(config((c) => (c.modules.paylink.settings = { savedCardCharges: true })), new ModuleRegistry({ adapters: withCards, modules: builtInModules(), capabilities: { savedCards: { modes: ["connect"] } } }));
+    assert.deepEqual(coded.map((p) => [p.code, p.params]), [["paylink.saved_cards_mode", { mode: "platform", modes: "connect" }]]);
+  });
+
   it("checks trace settings, and needs a signer only while receipts are on", () => {
     const at = (settings: unknown, adapters = ALL_ADAPTERS) => validateConfig(config((c) => (c.modules.trace.settings = settings)), registry(adapters));
     assert.deepEqual(at([]), ["modules.trace.settings: must be an object"]);
@@ -656,7 +678,7 @@ describe("validateConfig: flows", () => {
     const door = outside("door", { scopes: { grants: [], needs: { "door.lookup": "door.open" }, classes: { "door.open": "access" } }, provides: { factors: [], steps: ["door.lookup"], outcomes: [] } });
     const lax = outside("lax", { scopes: { grants: [], needs: {}, classes: { "door.open": "none" } }, provides: { factors: [], steps: ["lax.lookup"], outcomes: [] } });
     const reg = registry(ALL_ADAPTERS, [door, lax]);
-    assert.deepEqual(reg.scopeClasses(), { "payment.request": "money", "intake.file": "none", "entry.open": "access", "entry.sign_in": "access", "door.open": "access" });
+    assert.deepEqual(reg.scopeClasses(), { "payment.request": "money", "payment.saved_card": "money", "intake.file": "none", "entry.open": "access", "entry.sign_in": "access", "door.open": "access" });
     const problems = validateConfig(config((c) => (c.policy.scopes["door.open"] = 1)), reg);
     assert.deepEqual(problems, ["policy: scope door.open is access, and below its floor of level 2"]);
   });

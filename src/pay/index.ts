@@ -11,6 +11,7 @@ export {
   PAYMENT_CHANNEL_KEYS,
   PAYMENT_CHANNEL_PURPOSES,
   PAYMENT_EMAIL,
+  SAVED_CARD_SCOPE,
   paylinkModule,
   type ChannelChoice,
   type FixedPaymentInput,
@@ -21,6 +22,7 @@ export {
   type PaymentChannelOffer,
   type PaymentInput,
   type ReferencedPaymentInput,
+  type SavedCardChargeAnswer,
 } from "./paylink.ts";
 export * from "./payment.ts";
 export {

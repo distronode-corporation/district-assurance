@@ -37,6 +37,10 @@ import type {
   ReceiptSigner,
   RecordDelivery,
   RecordStore,
+  SavedCardCapabilities,
+  SavedCardChargeRequest,
+  SavedCardChargeResult,
+  SavedCards,
   SubjectRecord,
 } from "../core/adapters.ts";
 import type { Clock, IdGenerator } from "../core/clock.ts";
@@ -210,6 +214,42 @@ export class FakePaymentLinks implements PaymentLinks {
   /** The provider closed a link on its own (paid or expired): a later expireLink answers not_open. */
   settle(linkId: string): void {
     this.#closed.add(linkId);
+  }
+}
+
+/**
+ * Saved cards for tests and the demo (PAY-4): it never holds a card, and charges nothing anywhere.
+ * `answer` says how a new charge answers: `charge` (charged), `decline` (certainly not charged), or
+ * `lose` (charged, then the answer was lost: the call throws). Like a provider, it charges once per
+ * idempotency key, and a repeated key gives the first answer back. Every request is in `received`;
+ * `charged` holds the charges it made.
+ */
+export class FakeSavedCards implements SavedCards {
+  readonly capabilities: SavedCardCapabilities;
+  readonly received: SavedCardChargeRequest[] = [];
+  readonly charged: Array<{ providerRef: string; amountMinor: number; currency: string; subjectKey: string }> = [];
+  answer: "charge" | "decline" | "lose" = "charge";
+  readonly #byKey = new Map<string, SavedCardChargeResult>();
+
+  constructor(capabilities: Partial<SavedCardCapabilities> = {}) {
+    this.capabilities = { modes: ["connect", "platform"], ...capabilities };
+  }
+
+  async charge(input: SavedCardChargeRequest): Promise<SavedCardChargeResult> {
+    this.received.push(structuredClone(input));
+    const known = this.#byKey.get(input.idempotencyKey);
+    if (known !== undefined) return known;
+    if (this.answer === "decline") {
+      const declined = { outcome: "declined", reason: "card_declined" } as const;
+      this.#byKey.set(input.idempotencyKey, declined);
+      return declined;
+    }
+    const providerRef = `pi_fake_${this.charged.length + 1}`;
+    this.charged.push({ providerRef, amountMinor: input.amountMinor, currency: input.currency, subjectKey: input.subjectKey });
+    const charged = { outcome: "charged", providerRef } as const;
+    this.#byKey.set(input.idempotencyKey, charged);
+    if (this.answer === "lose") throw new Error("the saved-card answer was lost");
+    return charged;
   }
 }
 

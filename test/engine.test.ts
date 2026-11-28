@@ -7,9 +7,9 @@ import { createHmac } from "node:crypto";
 import { describe, it } from "node:test";
 import { runInNewContext } from "node:vm";
 
-import type { AuditInput, IntakeRecord, PaymentLinks, SessionStore, WriteHint } from "../src/core/adapters.ts";
+import type { AuditInput, IntakeRecord, PaymentLinks, SavedCardChargeResult, SavedCards, SessionStore, WriteHint } from "../src/core/adapters.ts";
 import { canonicalJson, type JsonValue } from "../src/core/canonical.ts";
-import { ConfigError } from "../src/core/config.ts";
+import { ConfigError, type FlowConfig } from "../src/core/config.ts";
 import { hmacSha256Hex } from "../src/core/hash.ts";
 import type { DeliveredEvent, EngineEvent } from "../src/core/events.ts";
 import { MemorySessionStore } from "../src/core/session-store.ts";
@@ -18,12 +18,12 @@ import { INTERRUPT_LINES, bankAccountRedactor, cardNumberRedactor, composeRedact
 import { createEngine } from "../src/engine.ts";
 import { intakeDigest, type IntakeForm } from "../src/file/intake.ts";
 import { defaultConfig } from "../src/modules.ts";
-import { formatAmount } from "../src/pay/paylink.ts";
+import { formatAmount, SAVED_CARD_SCOPE } from "../src/pay/paylink.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
-import { verifyReceipt } from "../src/prove/receipt.ts";
+import { verifyReceipt, type SignedReceipt } from "../src/prove/receipt.ts";
 import { isStopRequest } from "../src/prove/consent.ts";
 import { FakeCarrierSignals, FakeFieldCipher, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryAttemptCounters, MemoryConsentStore, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
-import { TEST_KNOWLEDGE_KEY, auditLedgerContract, createTestEngine, sessionStoreContract } from "../src/testing/index.ts";
+import { TEST_KNOWLEDGE_KEY, auditLedgerContract, createTestEngine, sessionStoreContract, type TestEngine } from "../src/testing/index.ts";
 import { ACCOUNT, confirmAmount, DOB, PHONE_ON_FILE, PIN, form, heard, rejects, setup, testConfig, verifiedCall, waitOut } from "./helpers.ts";
 
 /** The digest of the read-back the caller heard, or any digest once no draft is open (a filed or released intake asks for none). */
@@ -1397,6 +1397,426 @@ describe("Engine pay", () => {
     assert.equal(formatAmount("en", 15000, "cad"), "$150.00");
     assert.match(formatAmount("en", 150, "jpy"), /^JP¥150$|^¥150$/u);
     assert.match(formatAmount("fr", 15000, "cad"), /^150,00\s\$$/u);
+  });
+});
+
+describe("Engine pay: saved-card charges (PAY-4)", () => {
+  const request = { amountMinor: 15000, currency: "cad", description: "Deposit", amountSource: "price_list" as const };
+
+  /** Saved-card charges on, and the policy naming payment.saved_card at `level` (or not at all). */
+  function charging(options: { level?: 2 | 3 | null; settings?: Record<string, JsonValue>; patch?: (c: FlowConfig) => void; savedCards?: SavedCards } = {}): TestEngine {
+    const level = options.level === undefined ? 2 : options.level;
+    return setup({
+      config: testConfig((c) => {
+        c.modules.paylink = { settings: { savedCardCharges: true, ...options.settings } };
+        if (level !== null) c.policy.scopes[SAVED_CARD_SCOPE] = level;
+        options.patch?.(c);
+      }),
+      ...(options.savedCards === undefined ? {} : { adapters: { savedCards: options.savedCards } }),
+    });
+  }
+
+  /** A call verified to level 2 (keypad and a carrier identity match) or 1 (keypad only). */
+  async function callAt(t: TestEngine, level: 1 | 2): Promise<string> {
+    const { callId } = await t.engine.startCall();
+    await t.engine.beginVerification(callId, { accountNumber: ACCOUNT });
+    await t.engine.submitKeypad(callId, { dob: DOB });
+    if (level === 2) {
+      t.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+      await t.engine.checkCarrier(callId);
+    }
+    assert.equal((await t.engine.finishVerification(callId)).level, level);
+    return callId;
+  }
+
+  const events = async (t: TestEngine, prefix = "payment.card_") => (await t.ledger.list()).filter((e) => e.event.startsWith(prefix)).map((e) => [e.event, e.actor, e.detail]);
+
+  it("charges the saved card of a level 2 caller once, for the amount read back and confirmed, and the receipt names it", async () => {
+    const t = charging();
+    const callId = await callAt(t, 2);
+    await confirmAmount(t.engine, callId, request);
+    const charged = await t.engine.chargeSavedCard(callId, request);
+    assert.deepEqual(charged, { paymentId: "pay_1", status: "paid" });
+    const subjectKey = t.savedCards.received[0]!.subjectKey;
+    assert.match(subjectKey, /^[0-9a-f]{64}$/, "the subject by its keyed digest, never the account number");
+    assert.deepEqual(t.savedCards.received, [
+      {
+        callId,
+        paymentId: "pay_1",
+        subjectKey,
+        amountMinor: 15000,
+        currency: "cad",
+        description: "Deposit",
+        mode: "platform",
+        idempotencyKey: JSON.stringify(["ws_test", callId, "pay_1", "charge", "platform"]),
+        notAfter: new Date(t.clock.now().getTime() + 60_000).toISOString(),
+      },
+    ]);
+    assert.deepEqual(await events(t), [
+      ["payment.card_charge_requested", "code", { paymentId: "pay_1", amountMinor: 15000, currency: "cad", amountSource: "price_list", mode: "platform" }],
+      ["payment.card_charged", "code", { paymentId: "pay_1", providerRef: "pi_fake_1", amountMinor: 15000, currency: "cad", mode: "platform" }],
+    ]);
+    // The read-back is used up: a second charge needs the caller to hear and confirm an amount again.
+    await assert.rejects(t.engine.chargeSavedCard(callId, request), rejects("precondition_failed", /read back and confirmed/));
+    assert.equal(t.savedCards.received.length, 1);
+    assert.equal((await t.engine.state(callId)).phase, "open", "the call never waits on a charge");
+    const ledger = JSON.stringify(await t.ledger.list());
+    for (const value of [ACCOUNT, DOB, PHONE_ON_FILE, subjectKey]) assert.equal(ledger.includes(value), false, "no value in the ledger");
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual(receipt.body.payments, [{ paymentId: "pay_1", status: "paid", amountMinor: 15000, currency: "cad", mode: "platform", providerRef: "pi_fake_1", method: "saved_card" }]);
+    assert.equal(verifyReceipt(receipt, t.engine.receiptKeys()), true);
+  });
+
+  it("charges on the business's account in connect mode", async () => {
+    const t = charging({ settings: { mode: "connect", connectedAccountId: "acct_business" } });
+    const callId = await callAt(t, 2);
+    await confirmAmount(t.engine, callId, request);
+    assert.equal((await t.engine.chargeSavedCard(callId, request)).status, "paid");
+    const asked = t.savedCards.received[0]!;
+    assert.equal(asked.mode, "connect");
+    assert.equal(asked.connectedAccountId, "acct_business");
+    assert.equal(asked.idempotencyKey, JSON.stringify(["ws_test", callId, asked.paymentId, "charge", "connect"]));
+  });
+
+  it("is off by default and off unless set to true: refused before anything is written", async () => {
+    for (const settings of [undefined, { savedCardCharges: false }]) {
+      const t = setup({ config: testConfig((c) => (c.modules.paylink = settings === undefined ? {} : { settings })) });
+      const callId = await verifiedCall(t);
+      await confirmAmount(t.engine, callId, request);
+      const before = (await t.ledger.list()).length;
+      await assert.rejects(t.engine.chargeSavedCard(callId, request), rejects("precondition_failed", /saved-card charges are off/));
+      assert.equal(t.savedCards.received.length, 0);
+      assert.equal((await t.ledger.list()).length, before);
+    }
+  });
+
+  it("refuses a caller below level 2, and a policy that does not allow the scope, with one refusal that names no check", async () => {
+    // A level 1 caller: the money scope's floor refuses it, read-back or not.
+    const low = charging();
+    const lowCall = await callAt(low, 1);
+    await assert.rejects(low.engine.chargeSavedCard(lowCall, request), rejects("scope_denied", /^the grant does not cover payment\.saved_card$/));
+    // The policy does not name payment.saved_card: refused the same way, even at level 3.
+    const unnamed = charging({ level: null });
+    const unnamedCall = await verifiedCall(unnamed);
+    await confirmAmount(unnamed.engine, unnamedCall, request);
+    await assert.rejects(unnamed.engine.chargeSavedCard(unnamedCall, request), rejects("scope_denied", /^the grant does not cover payment\.saved_card$/));
+    // A business that asks for level 3 gets level 3.
+    const strict = charging({ level: 3 });
+    const strictCall = await callAt(strict, 2);
+    await confirmAmount(strict.engine, strictCall, request);
+    await assert.rejects(strict.engine.chargeSavedCard(strictCall, request), rejects("scope_denied", /^the grant does not cover payment\.saved_card$/));
+    for (const t of [low, unnamed, strict]) assert.equal(t.savedCards.received.length, 0);
+    // Never below level 2, whatever the business sets: the policy is refused when it is saved.
+    assert.throws(() => charging({ level: 1 as 2 }), (e: unknown) => e instanceof ConfigError && e.problems.includes("policy: scope payment.saved_card is money, and below its floor of level 2"));
+  });
+
+  it("holds the scope to the step-up rules on the amount confirmed, and writes the rule down", async () => {
+    const t = charging({ patch: (c) => (c.policy.stepUp = [{ name: "large_charge", scope: SAVED_CARD_SCOPE, level: 3, amountOverMinor: { cad: 50000 } }]) });
+    const callId = await callAt(t, 2);
+    const large = { ...request, amountMinor: 60000 };
+    await confirmAmount(t.engine, callId, large);
+    await assert.rejects(t.engine.chargeSavedCard(callId, large), rejects("scope_denied", /large_charge/));
+    assert.equal(t.savedCards.received.length, 0);
+    assert.ok((await t.ledger.list()).some((e) => e.event === "policy.step_up" && e.detail.rule === "large_charge"));
+    // Under the threshold, the same caller is charged.
+    await confirmAmount(t.engine, callId, request);
+    assert.equal((await t.engine.chargeSavedCard(callId, request)).status, "paid");
+  });
+
+  it("never charges without the caller's confirmed read-back of this request, nor above the limit in force", async () => {
+    const t = charging();
+    const callId = await callAt(t, 2);
+    await assert.rejects(t.engine.chargeSavedCard(callId, request), rejects("precondition_failed", /read back and confirmed/));
+    await t.engine.readBackPayment(callId, request);
+    await assert.rejects(t.engine.chargeSavedCard(callId, request), rejects("precondition_failed", /has not confirmed/));
+    await confirmAmount(t.engine, callId, request);
+    await assert.rejects(t.engine.chargeSavedCard(callId, { ...request, amountMinor: 16000 }), rejects("precondition_failed", /not the amount read back/));
+    await assert.rejects(t.engine.chargeSavedCard(callId, undefined as never), rejects("invalid_input", /outside a flow/));
+    await assert.rejects(t.engine.chargeSavedCard(callId, "15000" as never), rejects("invalid_input", /outside a flow/));
+    // The limit lowered after the read-back: refused, nothing charged.
+    t.engine.configure(testConfig((c) => {
+      c.modules.paylink = { settings: { savedCardCharges: true, maxAmountMinor: 10000 } };
+      c.policy.scopes[SAVED_CARD_SCOPE] = 2;
+    }));
+    await assert.rejects(t.engine.chargeSavedCard(callId, request), rejects("invalid_input", /above the limit/));
+    assert.equal(t.savedCards.received.length, 0);
+  });
+
+  it("refuses inside a flow, while a link is out, and on an ended call", async () => {
+    const flowing = charging({
+      patch: (c) =>
+        (c.flows = {
+          deposit: { steps: [{ type: "badge.verify", level: 2, factors: ["keypad_knowledge", "carrier_identity_match"], scopes: ["payment.request", SAVED_CARD_SCOPE] }, { type: "paylink.request", ...request }] },
+        }),
+    });
+    flowing.carrier.set(PHONE_ON_FILE, { identityMatch: "match" });
+    const { callId: inFlow } = await flowing.engine.startCall({ flow: "deposit" });
+    await flowing.engine.beginVerification(inFlow, { accountNumber: ACCOUNT });
+    await flowing.engine.submitKeypad(inFlow, { dob: DOB });
+    await flowing.engine.checkCarrier(inFlow);
+    assert.equal((await flowing.engine.finishVerification(inFlow)).level, 2);
+    await confirmAmount(flowing.engine, inFlow);
+    await assert.rejects(flowing.engine.chargeSavedCard(inFlow, request), rejects("precondition_failed", /outside a flow/));
+
+    const t = charging();
+    const callId = await callAt(t, 2);
+    await confirmAmount(t.engine, callId, request);
+    await t.engine.requestPayment(callId, request);
+    await assert.rejects(t.engine.chargeSavedCard(callId, request), rejects("invalid_transition", /while paying/));
+    await t.engine.endCall(callId);
+    await assert.rejects(t.engine.chargeSavedCard(callId, request), rejects("scope_denied"));
+    for (const e of [flowing, t]) assert.equal(e.savedCards.received.length, 0);
+  });
+
+  it("records a lost answer as unknown, never as charged, and takes no other payment on the call", async () => {
+    const t = charging();
+    t.savedCards.answer = "lose";
+    const callId = await callAt(t, 2);
+    await confirmAmount(t.engine, callId, request);
+    assert.deepEqual(await t.engine.chargeSavedCard(callId, request), { paymentId: "pay_1", status: "unknown" });
+    assert.equal(t.savedCards.charged.length, 1, "the provider did charge: only the answer was lost");
+    assert.deepEqual((await events(t)).at(-1), ["payment.card_unknown", "code", { paymentId: "pay_1", reason: "answer_lost" }]);
+    // Never sent again, and nothing else may take the money a second time on this call.
+    t.savedCards.answer = "charge";
+    await confirmAmount(t.engine, callId, request);
+    await assert.rejects(t.engine.chargeSavedCard(callId, request), rejects("precondition_failed", /no known outcome/));
+    await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /no known outcome/));
+    assert.equal(t.savedCards.received.length, 1);
+    assert.equal(t.payments.created.length, 0);
+    const receipt = (await t.engine.endCall(callId))!;
+    assert.deepEqual(receipt.body.payments, [{ paymentId: "pay_1", status: "unknown", amountMinor: 15000, currency: "cad", mode: "platform", providerRef: "", method: "saved_card" }]);
+  });
+
+  it("reads an answer it cannot trust as unknown, and a decline as declined with a short reason code", async () => {
+    const answers: unknown[] = [
+      null,
+      { outcome: "charged" },
+      { outcome: "charged", providerRef: "" },
+      // A provider id the ledger and the receipt cannot carry: a lone surrogate, a card number, a space.
+      { outcome: "charged", providerRef: "pi_\ud800" },
+      { outcome: "charged", providerRef: "4111111111111111" },
+      { outcome: "charged", providerRef: "pi 1" },
+      { outcome: "declined", reason: 7 },
+      { outcome: "refunded" },
+    ];
+    for (const answer of answers) {
+      const t = charging({ savedCards: { capabilities: { modes: ["platform"] }, charge: async () => answer as never } });
+      const callId = await callAt(t, 2);
+      await confirmAmount(t.engine, callId, request);
+      assert.equal((await t.engine.chargeSavedCard(callId, request)).status, "unknown", JSON.stringify(answer));
+      assert.deepEqual((await events(t)).at(-1)![2], { paymentId: "pay_1", reason: "malformed_answer" });
+    }
+    for (const [reason, code] of [
+      ["insufficient_funds", "insufficient_funds"],
+      ["Card was declined: 4111 1111 1111 1111", "declined"],
+      // A short code that carries a card number: the ledger would refuse it, so it is never kept.
+      ["card_4111111111111111", "declined"],
+    ] as const) {
+      const t = charging({ savedCards: { capabilities: { modes: ["platform"] }, charge: async () => ({ outcome: "declined", reason }) } });
+      const callId = await callAt(t, 2);
+      await confirmAmount(t.engine, callId, request);
+      assert.equal((await t.engine.chargeSavedCard(callId, request)).status, "declined");
+      assert.deepEqual((await events(t)).at(-1), ["payment.card_declined", "code", { paymentId: "pay_1", reason: code }]);
+      // A decline is settled: the card certainly was not charged, so the caller can pay another way.
+      await confirmAmount(t.engine, callId, request);
+      await t.engine.requestPayment(callId, request);
+      assert.equal(t.payments.created.length, 1);
+    }
+    // The fake's own decline.
+    const t = charging();
+    t.savedCards.answer = "decline";
+    const callId = await callAt(t, 2);
+    await confirmAmount(t.engine, callId, request);
+    assert.equal((await t.engine.chargeSavedCard(callId, request)).status, "declined");
+    assert.equal(t.savedCards.charged.length, 0);
+    assert.equal((await t.engine.endCall(callId))!.body.payments[0]!.status, "declined");
+  });
+
+  it("never sends a charge whose 60 seconds ran out while its reservation was being written, and records it not sent", async () => {
+    for (const ended of [false, true]) {
+      // A ledger that holds the reservation's entry, as a slow ledger would: the reservation's write
+      // returns only once it is appended.
+      const ledger = new MemoryAuditLedger();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let reached!: () => void;
+      const reserving = new Promise<void>((resolve) => (reached = resolve));
+      const append = ledger.append.bind(ledger);
+      ledger.append = async (input) => {
+        if (input.event === "payment.card_charge_requested") {
+          reached();
+          await held;
+        }
+        return append(input);
+      };
+      const t = setup({ config: testConfig((c) => {
+        c.modules.paylink = { settings: { savedCardCharges: true } };
+        c.policy.scopes[SAVED_CARD_SCOPE] = 2;
+      }), adapters: { ledger } });
+      const callId = await callAt(t, 2);
+      await confirmAmount(t.engine, callId, request);
+      const charge = t.engine.chargeSavedCard(callId, request);
+      await reserving;
+      t.clock.advance(60_000);
+      // The end of the call settles the charge unknown once its 60 seconds ran out; its receipt waits on the ledger.
+      const end = ended ? t.engine.endCall(callId) : null;
+      if (ended) while ((await t.engine.state(callId)).phase !== "ended") await new Promise((resolve) => setImmediate(resolve));
+      release();
+      await assert.rejects(charge, rejects("precondition_failed", /not charged/));
+      assert.equal(t.savedCards.received.length, 0, "nothing was sent to the provider");
+      const written = (await ledger.list()).filter((e) => e.event.startsWith("payment.card_")).map((e) => [e.event, e.actor, e.detail]);
+      assert.deepEqual(written.at(ended ? -1 : 1), ["payment.card_not_sent", "code", { paymentId: "pay_1", reason: "lease_lapsed", ...(ended ? { late: true } : {}) }]);
+      if (end !== null) assert.equal((await end)!.body.payments[0]!.status, "unknown", "the receipt was signed before the charge was found unsent");
+      else {
+        // Not sent is settled: the caller can pay another way on the call.
+        await confirmAmount(t.engine, callId, request);
+        assert.equal((await t.engine.chargeSavedCard(callId, request)).status, "paid");
+        assert.deepEqual((await t.engine.endCall(callId))!.body.payments.map((p) => p.status), ["not_sent", "paid"]);
+      }
+    }
+  });
+
+  it("tells the adapter its deadline, so a sender paused after the check is not sent past it, and records its answer late", async () => {
+    // The sender passed the check, then stalled before its request: meanwhile the call's 60 seconds
+    // ran out and another process ended the call, settling the charge unknown on the receipt. An
+    // adapter that honours notAfter then refuses to send, and that answer is recorded, flagged late.
+    let t!: TestEngine;
+    let receipt: SignedReceipt | null = null;
+    t = charging({
+      savedCards: {
+        capabilities: { modes: ["platform"] },
+        charge: async (input) => {
+          t.clock.advance(60_000);
+          receipt = await t.engine.endCall(input.callId);
+          return Date.parse(input.notAfter) <= t.clock.now().getTime() ? { outcome: "declined", reason: "not_after" } : { outcome: "charged", providerRef: "pi_late" };
+        },
+      },
+    });
+    const callId = await callAt(t, 2);
+    await confirmAmount(t.engine, callId, request);
+    assert.deepEqual(await t.engine.chargeSavedCard(callId, request), { paymentId: "pay_1", status: "declined" });
+    assert.equal(receipt!.body.payments[0]!.status, "unknown", "the receipt says unknown: never that nothing was charged");
+    assert.deepEqual((await events(t)).slice(-2), [
+      ["payment.card_unknown", "system", { paymentId: "pay_1", reason: "no_answer_recorded" }],
+      ["payment.card_declined", "code", { paymentId: "pay_1", reason: "not_after", late: true }],
+    ]);
+  });
+
+  it("writes a late answer to the ledger even after the ended call's record was removed, and loses nothing else", async () => {
+    for (const late of ["charged", "declined", "lost"] as const) {
+      let t!: TestEngine;
+      t = charging({
+        savedCards: {
+          capabilities: { modes: ["platform"] },
+          charge: async (input) => {
+            // The answer is slow: the call ends with the charge unknown, and the host removes its record.
+            t.clock.advance(60_000);
+            await t.engine.endCall(input.callId);
+            assert.deepEqual(await t.engine.removeCall(input.callId), { removed: true });
+            if (late === "lost") throw new Error("timeout");
+            return late === "charged" ? { outcome: "charged", providerRef: "pi_late" } : { outcome: "declined", reason: "expired_card" };
+          },
+        },
+      });
+      const callId = await callAt(t, 2);
+      await confirmAmount(t.engine, callId, request);
+      if (late === "lost") {
+        await assert.rejects(t.engine.chargeSavedCard(callId, request), rejects("unknown_call"), "a lost answer adds nothing to the unknown the ledger has");
+        assert.equal((await events(t)).at(-1)![0], "payment.card_unknown");
+        continue;
+      }
+      assert.deepEqual(await t.engine.chargeSavedCard(callId, request), { paymentId: "pay_1", status: late === "charged" ? "paid" : "declined" });
+      const entry = (await t.ledger.list()).at(-1)!;
+      assert.equal(entry.callId, callId);
+      assert.deepEqual(
+        [entry.event, entry.actor, entry.detail],
+        late === "charged"
+          ? ["payment.card_charged", "code", { paymentId: "pay_1", providerRef: "pi_late", amountMinor: 15000, currency: "cad", mode: "platform", late: true }]
+          : ["payment.card_declined", "code", { paymentId: "pay_1", reason: "expired_card", late: true }],
+      );
+      assert.equal(verifyChain(await t.ledger.list()).ok, true);
+    }
+  });
+
+  it("passes on a store failure while it records the answer, as any write does", async () => {
+    for (const failure of ["thrown", "conflict"] as const) {
+      const sessions = new MemorySessionStore();
+      let failing = false;
+      const get = sessions.get.bind(sessions);
+      const compareAndSet = sessions.compareAndSet.bind(sessions);
+      sessions.get = async (...args) => {
+        if (failing && failure === "thrown") throw new Error("store down");
+        return get(...args);
+      };
+      sessions.compareAndSet = async (...args) => (failing && failure === "conflict" ? { ok: false } : compareAndSet(...args));
+      const t = setup({
+        config: testConfig((c) => {
+          c.modules.paylink = { settings: { savedCardCharges: true } };
+          c.policy.scopes[SAVED_CARD_SCOPE] = 2;
+        }),
+        adapters: {
+          sessions,
+          savedCards: {
+            capabilities: { modes: ["platform"] },
+            charge: async () => {
+              failing = true;
+              return { outcome: "charged", providerRef: "pi_1" };
+            },
+          },
+        },
+      });
+      const callId = await callAt(t, 2);
+      await confirmAmount(t.engine, callId, request);
+      await assert.rejects(t.engine.chargeSavedCard(callId, request), failure === "thrown" ? /store down/ : rejects("conflict"));
+      failing = false;
+      assert.equal((await t.engine.state(callId)).phase, "open");
+      assert.equal((await events(t)).at(-1)![0], "payment.card_charge_requested", "the charge stays waiting, never recorded as anything");
+    }
+  });
+
+  it("ends the call only once a charge answers, or after its 60 seconds with the charge unknown, and records a later answer flagged late", async () => {
+    for (const late of ["charged", "lost"] as const) {
+      let answer!: (value: SavedCardChargeResult) => void;
+      let fail!: (error: Error) => void;
+      let asked!: () => void;
+      const sent = new Promise<void>((resolve) => (asked = resolve));
+      const t = charging({
+        savedCards: {
+          capabilities: { modes: ["platform"] },
+          charge: () => {
+            asked();
+            return new Promise<SavedCardChargeResult>((resolve, reject) => {
+              answer = resolve;
+              fail = reject;
+            });
+          },
+        },
+      });
+      const callId = await callAt(t, 2);
+      await confirmAmount(t.engine, callId, request);
+      const charge = t.engine.chargeSavedCard(callId, request);
+      await sent;
+      await assert.rejects(t.engine.endCall(callId), rejects("precondition_failed", /being charged/));
+      await assert.rejects(t.engine.requestPayment(callId, request), rejects("precondition_failed", /no known outcome/));
+      t.clock.advance(60_000);
+      const receipt = (await t.engine.endCall(callId))!;
+      assert.equal(receipt.body.payments[0]!.status, "unknown");
+      const entries = await t.ledger.list();
+      const unknownAt = entries.findIndex((e) => e.event === "payment.card_unknown");
+      assert.deepEqual([entries[unknownAt]!.actor, entries[unknownAt]!.detail], ["system", { paymentId: "pay_1", reason: "no_answer_recorded" }]);
+      assert.ok(unknownAt < entries.findIndex((e) => e.event === "call.ended"), "settled before the call ended and before the receipt's head");
+      if (late === "charged") {
+        answer({ outcome: "charged", providerRef: "pi_late" });
+        assert.deepEqual(await charge, { paymentId: "pay_1", status: "paid" });
+        assert.deepEqual((await events(t)).at(-1), ["payment.card_charged", "code", { paymentId: "pay_1", providerRef: "pi_late", amountMinor: 15000, currency: "cad", mode: "platform", late: true }]);
+      } else {
+        fail(new Error("timeout"));
+        assert.deepEqual(await charge, { paymentId: "pay_1", status: "unknown" });
+        assert.equal((await events(t)).filter(([name]) => name === "payment.card_unknown").length, 1, "unknown once");
+      }
+      assert.deepEqual(await t.engine.receipt(callId), receipt, "the signed receipt is not changed; the ledger has what came after");
+      assert.equal(verifyChain(await t.ledger.list()).ok, true);
+    }
   });
 });
 

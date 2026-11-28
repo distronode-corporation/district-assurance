@@ -17,6 +17,7 @@ import {
   FakeMessageSender,
   FakePaymentLinks,
   FakePinVerifier,
+  FakeSavedCards,
   FixedClock,
   MemoryCodeStore,
   MemoryAttemptCounters,
@@ -39,6 +40,8 @@ export interface TestEngine {
   messages: FakeMessageSender;
   emails: FakeEmailSender;
   payments: FakePaymentLinks;
+  /** Wired as `savedCards`; used only while Paylink's `savedCardCharges` is on. */
+  savedCards: FakeSavedCards;
   records: MemoryRecordStore;
   ledger: MemoryAuditLedger;
   sessions: SessionStore;
@@ -71,6 +74,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     messages: new FakeMessageSender(),
     emails: new FakeEmailSender(),
     payments: new FakePaymentLinks(),
+    savedCards: new FakeSavedCards(),
     records: new MemoryRecordStore(),
     ledger: new MemoryAuditLedger(),
     sessions: new MemorySessionStore() as SessionStore,
@@ -87,6 +91,7 @@ export function createTestEngine(options: TestEngineOptions = {}): TestEngine {
     messages: parts.messages,
     emails: parts.emails,
     payments: parts.payments,
+    savedCards: parts.savedCards,
     records: parts.records,
     ledger: parts.ledger,
     sessions: parts.sessions,

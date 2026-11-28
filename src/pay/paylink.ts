@@ -30,7 +30,12 @@
 // chooses text (key 1) or email (key 2), and the keypress is their consent to that channel, under
 // its versioned wording. Without an address the choice is not offered and the link goes by text.
 // Either way it is the same single-use link, with the same deadline, send lease and close.
-import type { AmountSource, EmailSender, InstantPaymentMethod, PaymentLinkCapabilities, PaymentLinkClose, PaymentMode, SubjectRecord } from "../core/adapters.ts";
+//
+// Saved-card charges (PAY-4, `chargeSavedCard`): off unless Paylink's `savedCardCharges` is on, a
+// host call outside a flow charges the card the business already holds for the matched subject,
+// through the `savedCards` adapter, for a grant covering `payment.saved_card` (never below level 2)
+// and only the amount the caller confirmed. It is sent once; a lost answer is `unknown` (ADR-39).
+import type { AmountSource, EmailSender, InstantPaymentMethod, PaymentLinkCapabilities, PaymentLinkClose, PaymentMode, SavedCardCapabilities, SavedCardChargeResult, SubjectRecord } from "../core/adapters.ts";
 import type { JsonValue } from "../core/canonical.ts";
 import { isEmailAddress } from "../core/email.ts";
 import { EngineError } from "../core/errors.ts";
@@ -42,6 +47,7 @@ import type { CallDraft, CallRecord, EngineRuntime, Locale } from "../core/runti
 import type { SessionState } from "../core/session.ts";
 import { isIntegerIn, isObject, unknownKeys } from "../core/shape.ts";
 import { keepEmailAddress, keptEmailAddress, recordConsent, TRACE, type TraceSettings, type TraceSlice } from "../prove/trace.ts";
+import { detailCarriesCardNumber } from "../prove/ledger.ts";
 import { matchedSubject } from "../verify/badge.ts";
 import { AMOUNT_REF, buildAmountReadBack, formatAmount, type AmountQuote, type AmountReadBack } from "./amount.ts";
 import {
@@ -60,17 +66,25 @@ import {
   type PaymentOutcome,
   type PaymentRequest,
   type PaymentStatus,
+  type SavedCardCharge,
+  type SavedCardChargeStatus,
 } from "./payment.ts";
 import type { PaymentAfterwards } from "./refunds.ts";
 
 export const PAYLINK = "paylink";
+
+/**
+ * The scope a saved-card charge needs (PAY-4). A money scope by its name, so never below level 2,
+ * and refused unless the policy lists it: the business names it, at 2 or 3, to allow the charges.
+ */
+export const SAVED_CARD_SCOPE = "payment.saved_card";
 
 export { AMOUNT_REGION, formatAmount } from "./amount.ts";
 
 const AMOUNT_SOURCES: readonly AmountSourceKind[] = ["intake_record", "business_endpoint", "price_list"];
 const CONFIRMED_BY: readonly string[] = ["voice", "keypad"];
 
-/** A provider's account id: what a host's adapter passes on (for Stripe, `acct_...`). */
+/** A provider's account id, or a saved-card charge's id: what a host's adapter passes on (for Stripe, `acct_...`, `pi_...`). */
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{1,255}$/;
 
 export interface PaylinkSettings {
@@ -90,6 +104,12 @@ export interface PaylinkSettings {
    * when no verified address is on file.
    */
   channels?: PaymentChannel[];
+  /**
+   * Turns on charging the card the business already holds for the subject (`chargeSavedCard`,
+   * PAY-4), through the `savedCards` adapter, for a caller whose grant covers `payment.saved_card`
+   * (a money scope, never below level 2). Off unless set to `true`.
+   */
+  savedCardCharges?: boolean;
 }
 
 /** A step with a fixed amount (`amountMinor` and `currency`) or one the AmountSource resolves (`amountRef`), never both. */
@@ -153,6 +173,8 @@ export interface PaylinkSlice {
   channel?: ChannelChoice | null;
   /** How many choices were made on this call, for the channel step's status. Absent before the first. */
   choices?: number;
+  /** The call's saved-card charges (PAY-4). Absent on a call that made none. */
+  charges?: SavedCardCharge[];
 }
 
 /** The channels a link can go by, in the order they are offered. */
@@ -286,21 +308,52 @@ function channelStepErrors(step: FlowStep, ctx: StepContext): StructuredProblem[
   return errors;
 }
 
+/** Problems between Paylink's settings and what the payments adapter declares. */
+function linkAdapterErrors(s: PaylinkSettings, capabilities: Readonly<Record<string, unknown>>): StructuredProblem[] {
+  // Known to be absent (an engine's adapter declared nothing): refused. Not known at all: skipped.
+  if (Object.hasOwn(capabilities, "payments") && capabilities.payments === undefined) {
+    return [problem("paylink.adapter_capabilities_missing", "the payments adapter declares no capabilities ({ modes, minLinkMinutes, maxLinkMinutes })")];
+  }
+  const caps = capabilities.payments;
+  if (caps === undefined) return [];
+  if (!isCapabilities(caps)) return [problem("paylink.adapter_capabilities_shape", "the payments adapter's capabilities must be { modes, minLinkMinutes, maxLinkMinutes }")];
+  // The provider is asked for at least its minimum plus 5 minutes, so a narrower range could never create a link.
+  if (caps.maxLinkMinutes < caps.minLinkMinutes + MIN_LINK_LIFE_MINUTES) {
+    return [problem("paylink.adapter_minutes_range", `the payments adapter's maxLinkMinutes must be at least its minLinkMinutes plus ${MIN_LINK_LIFE_MINUTES}`, { min: caps.minLinkMinutes, max: caps.maxLinkMinutes })];
+  }
+  return adapterErrors(caps, s.mode ?? "platform", s.linkLifeMinutes ?? DEFAULT_LINK_LIFE_MINUTES);
+}
+
+function isSavedCardCapabilities(value: unknown): value is SavedCardCapabilities {
+  return isObject(value) && Array.isArray(value.modes) && value.modes.every((m) => (PAYMENT_MODES as readonly unknown[]).includes(m));
+}
+
+/** Problems between saved-card charges, turned on, and what the savedCards adapter declares: the mode charges are made in. */
+function savedCardAdapterErrors(s: PaylinkSettings, capabilities: Readonly<Record<string, unknown>>): StructuredProblem[] {
+  // Absent from the map: the adapter is missing (reported on its own), or the registry knows no capabilities.
+  if (!Object.hasOwn(capabilities, "savedCards")) return [];
+  const caps = capabilities.savedCards;
+  if (!isSavedCardCapabilities(caps)) return [problem("paylink.saved_cards_capabilities", "the savedCards adapter's capabilities must be { modes }, each connect or platform")];
+  const mode = s.mode ?? "platform";
+  return caps.modes.includes(mode) ? [] : [problem("paylink.saved_cards_mode", `the savedCards adapter does not charge in ${mode} mode (it charges in: ${caps.modes.join(", ") || "none"})`, { mode, modes: caps.modes.join(", ") || "none" })];
+}
+
 export const paylinkModule: AssuranceModule = {
   manifest: {
     name: PAYLINK,
     version: "3",
     summary: "Take a payment by a hosted link sent to the subject on file, by text or by email, on the business's account or the platform's.",
     provides: { factors: [], steps: ["paylink.request", "paylink.channel"], outcomes: ["payment"] },
-    scopes: { grants: [], needs: { "paylink.request": "payment.request" }, classes: { "payment.request": "money" } },
+    scopes: { grants: [], needs: { "paylink.request": "payment.request" }, classes: { "payment.request": "money", [SAVED_CARD_SCOPE]: "money" } },
     adapters: ["payments", "messages"],
   },
 
   validateSettings(settings: unknown): ValidationProblem[] {
     if (settings === undefined) return [];
     if (!isObject(settings)) return [problem("paylink.settings_shape", "must be an object")];
-    const errors = unknownKeys(settings, ["maxAmountMinor", "mode", "connectedAccountId", "linkLifeMinutes", "paymentMethods", "channels"]).map((k) => problem("paylink.unknown_setting", `${k} is not a paylink setting`, { key: k }));
+    const errors = unknownKeys(settings, ["maxAmountMinor", "mode", "connectedAccountId", "linkLifeMinutes", "paymentMethods", "channels", "savedCardCharges"]).map((k) => problem("paylink.unknown_setting", `${k} is not a paylink setting`, { key: k }));
     if (settings.channels !== undefined) errors.push(...channelsErrors(settings.channels));
+    if (settings.savedCardCharges !== undefined && typeof settings.savedCardCharges !== "boolean") errors.push(problem("paylink.saved_card_charges_shape", "savedCardCharges must be true or false"));
     if (settings.maxAmountMinor !== undefined && !isIntegerIn(settings.maxAmountMinor, 1, MAX_LINK_AMOUNT_MINOR)) {
       errors.push(problem("paylink.max_amount", `maxAmountMinor must be an integer from 1 to ${MAX_LINK_AMOUNT_MINOR}`, { max: MAX_LINK_AMOUNT_MINOR }));
     }
@@ -319,22 +372,12 @@ export const paylinkModule: AssuranceModule = {
 
   checkAdapters(settings: unknown, capabilities: Readonly<Record<string, unknown>>): ValidationProblem[] {
     const s = (settings ?? {}) as PaylinkSettings;
-    // Known to be absent (an engine's adapter declared nothing): refused. Not known at all: skipped.
-    if (Object.hasOwn(capabilities, "payments") && capabilities.payments === undefined) {
-      return [problem("paylink.adapter_capabilities_missing", "the payments adapter declares no capabilities ({ modes, minLinkMinutes, maxLinkMinutes })")];
-    }
-    const caps = capabilities.payments;
-    if (caps === undefined) return [];
-    if (!isCapabilities(caps)) return [problem("paylink.adapter_capabilities_shape", "the payments adapter's capabilities must be { modes, minLinkMinutes, maxLinkMinutes }")];
-    // The provider is asked for at least its minimum plus 5 minutes, so a narrower range could never create a link.
-    if (caps.maxLinkMinutes < caps.minLinkMinutes + MIN_LINK_LIFE_MINUTES) {
-      return [problem("paylink.adapter_minutes_range", `the payments adapter's maxLinkMinutes must be at least its minLinkMinutes plus ${MIN_LINK_LIFE_MINUTES}`, { min: caps.minLinkMinutes, max: caps.maxLinkMinutes })];
-    }
-    return adapterErrors(caps, s.mode ?? "platform", s.linkLifeMinutes ?? DEFAULT_LINK_LIFE_MINUTES);
+    return [...linkAdapterErrors(s, capabilities), ...(s.savedCardCharges === true ? savedCardAdapterErrors(s, capabilities) : [])];
   },
 
   requiredAdapters(settings: unknown): string[] {
-    return emailOn(settings as PaylinkSettings | undefined) ? ["payments", "messages", "emails"] : ["payments", "messages"];
+    const s = settings as PaylinkSettings | undefined;
+    return [...(emailOn(s) ? ["payments", "messages", "emails"] : ["payments", "messages"]), ...(s?.savedCardCharges === true ? ["savedCards"] : [])];
   },
 
   validateStep(step: FlowStep, ctx: StepContext): ValidationProblem[] {
@@ -406,16 +449,29 @@ export const paylinkModule: AssuranceModule = {
   },
 
   receiptPart(s: JsonValue, _state: SessionState): { [key: string]: JsonValue } {
+    const slice = s as unknown as PaylinkSlice;
     return {
-      payments: (s as unknown as PaylinkSlice).payments.map((p) => ({
-        paymentId: p.paymentId,
-        status: p.status,
-        amountMinor: p.amountMinor,
-        currency: p.currency,
-        // A payment recorded before modes existed was taken on the host's own account: platform.
-        mode: p.mode ?? "platform",
-        providerRef: p.linkId,
-      })),
+      payments: [
+        ...slice.payments.map((p) => ({
+          paymentId: p.paymentId,
+          status: p.status,
+          amountMinor: p.amountMinor,
+          currency: p.currency,
+          // A payment recorded before modes existed was taken on the host's own account: platform.
+          mode: p.mode ?? "platform",
+          providerRef: p.linkId,
+        })),
+        // The end of the call settled every charge still waiting for its answer, so none is `charging` here.
+        ...(slice.charges ?? []).map((c) => ({
+          paymentId: c.paymentId,
+          status: c.status,
+          amountMinor: c.amountMinor,
+          currency: c.currency,
+          mode: c.mode,
+          providerRef: c.providerRef ?? "",
+          method: "saved_card",
+        })),
+      ],
     };
   },
 };
@@ -795,6 +851,8 @@ export async function requestPayment(
     }
     // A link already out (or a call not open) is refused as a transition, before the read-back.
     draft.assertCan({ type: "payment_requested", paymentId: "next" });
+    // A saved-card charge whose outcome is not known may have taken the money: no link follows it.
+    if (chargeUnsettled(slice)) throw new EngineError("precondition_failed", CHARGE_UNSETTLED);
     const { channel, consentId } = chosenChannel(draft.record, slice, subject);
     const where = destinationFor(rt, draft.record, subject, channel, slice.channel !== null && slice.channel !== undefined && slice.channel.subjectKey === subject.subjectKey ? slice.channel.to : undefined);
     // A call saved before PAY-2 has no quote field: the same as no read-back.
@@ -1163,6 +1221,199 @@ export async function expirePaymentLinks(rt: EngineRuntime, callId: string): Pro
     if (settled) expired.push(payment.paymentId);
   }
   return { expired };
+}
+
+// ---- saved-card charges (PAY-4) --------------------------------------------------------------
+
+/** How long the end of a call waits for a saved-card charge's answer before it settles it unknown. */
+const CHARGE_LEASE_MS = 60_000;
+
+const CHARGE_UNSETTLED = "a saved-card charge on this call has no known outcome, so no other payment is taken on this call; settle it with the provider";
+
+/** Whether a saved-card charge of the call is still waiting for its answer, or answered nothing that can be read. */
+function chargeUnsettled(slice: PaylinkSlice): boolean {
+  return (slice.charges ?? []).some((c) => c.status === "charging" || c.status === "unknown");
+}
+
+/** What `chargeSavedCard` answers: the status the call holds. `unknown` is never charged nor declined: do not assume either. */
+export interface SavedCardChargeAnswer {
+  paymentId: string;
+  status: Exclude<SavedCardChargeStatus, "charging">;
+}
+
+/**
+ * Charges the card the business already holds for the matched subject (PAY-4), through the
+ * `savedCards` adapter, for the amount the caller heard read back and confirmed. Only with Paylink's
+ * `savedCardCharges` on, outside a flow, on an open call, with a keypad or PIN match and a grant
+ * that covers `payment.saved_card` (a money scope, never below level 2) at its minimum for that
+ * amount. The host's code passes the request it read back (`readBackPayment`); the read-back is used
+ * up by the charge.
+ *
+ * The charge is reserved in one write, sent once with an idempotency key the engine derives, and
+ * its answer committed in another. It is never retried: an answer that was lost or cannot be read is
+ * recorded `unknown`, never as charged, and while a charge of the call is unknown (or still waiting)
+ * no other charge or payment link is taken on that call. A charge whose 60 seconds ran out before it
+ * could be sent is never sent: it is recorded `not_sent`, and this throws `precondition_failed`.
+ */
+export async function chargeSavedCard(rt: EngineRuntime, callId: string, given: PaymentInput): Promise<SavedCardChargeAnswer> {
+  const settings = rt.settings<PaylinkSettings | undefined>(PAYLINK) ?? {};
+  if (settings.savedCardCharges !== true) throw new EngineError("precondition_failed", "saved-card charges are off in Paylink's settings");
+  // Read once: the request checked against the read-back is the one charged.
+  const input = isObject(given) ? ({ ...given } as PaymentInput) : undefined;
+  const reserved = await rt.update(callId, (draft) => {
+    // Outside a flow only: checked first, so a refused host call never fails a flow's step.
+    if (stepOfType<PaylinkRequestStep>(draft.record, "paylink.request") !== null) throw new EngineError("precondition_failed", "a saved-card charge is a host call outside a flow");
+    const slice = draft.slice<PaylinkSlice>(PAYLINK);
+    // The scope is held to its minimum for the amount the caller confirmed (VER-13).
+    const refused = rt.requireScope(draft, SAVED_CARD_SCOPE, slice.quote ?? null);
+    if (refused !== null) return { refused };
+    if (draft.record.state.phase !== "open") throw new EngineError("invalid_transition", `a saved card is charged on an open call, not while ${draft.record.state.phase}`);
+    const subject = matchedSubject(draft.record);
+    if (chargeUnsettled(slice)) throw new EngineError("precondition_failed", CHARGE_UNSETTLED);
+    if (input === undefined) throw new EngineError("invalid_input", OUTSIDE_A_FLOW);
+    const quote = confirmedQuote(slice.quote ?? null, input, subject);
+    // Checked again against the limit in force: the settings can change between the read-back and the charge.
+    const errors = requestErrors({ amountMinor: quote.amountMinor, currency: quote.currency, description: quote.description, amountSource: quote.amountSource }, settings.maxAmountMinor);
+    if (errors.length > 0) throw new EngineError("invalid_input", errors.map(problemMessage).join("; "));
+    // The settings were checked when saved: connect mode always names the business's account.
+    const terms = termsFor(settings, null);
+    slice.quote = null;
+    const charge: SavedCardCharge = {
+      paymentId: rt.ids.next("pay"),
+      amountMinor: quote.amountMinor,
+      currency: quote.currency,
+      description: quote.description,
+      amountSource: quote.amountSource,
+      mode: terms.mode,
+      connectedAccountId: terms.connectedAccountId,
+      status: "charging",
+      providerRef: null,
+      requestedAt: rt.now(),
+      settledAt: null,
+    };
+    (slice.charges ??= []).push(charge);
+    draft.emit("payment.card_charge_requested", "code", { paymentId: charge.paymentId, amountMinor: charge.amountMinor, currency: charge.currency, amountSource: charge.amountSource, mode: charge.mode });
+    return { charge, subjectKey: subject.subjectKey };
+  });
+  if ("refused" in reserved) throw reserved.refused;
+  const { charge, subjectKey } = reserved;
+  // The reservation's write returns once its ledger entries are appended, which can take a while:
+  // the charge is read again, with nothing awaited between this check and the send. One whose 60
+  // seconds ran out (the end of the call may settle it unknown from then on) is never sent.
+  const held = ((await rt.read(callId)).modules[PAYLINK] as unknown as PaylinkSlice).charges!.find((c) => c.paymentId === charge.paymentId)!;
+  if (held.status !== "charging" || rt.clock.now().getTime() - Date.parse(charge.requestedAt) >= CHARGE_LEASE_MS) {
+    await rt.update(callId, (draft) => {
+      const c = draft.slice<PaylinkSlice>(PAYLINK).charges!.find((x) => x.paymentId === charge.paymentId)!;
+      // Only this process sends the charge, so it is still waiting, or settled unknown by the end of
+      // the call (flagged late): either way nothing was sent.
+      const late = c.status === "unknown" ? { late: true } : {};
+      c.status = "not_sent";
+      c.settledAt = rt.now();
+      draft.emit("payment.card_not_sent", "code", { paymentId: c.paymentId, reason: "lease_lapsed", ...late });
+    });
+    throw new EngineError("precondition_failed", "the saved card was not charged: the charge could not be sent within its 60 seconds; read the amount back again");
+  }
+  let answer: SavedCardChargeResult | "lost" | "malformed";
+  try {
+    answer = readChargeAnswer(
+      await rt.adapter("savedCards").charge({
+        callId,
+        paymentId: charge.paymentId,
+        subjectKey,
+        amountMinor: charge.amountMinor,
+        currency: charge.currency,
+        description: charge.description,
+        mode: charge.mode,
+        ...(charge.connectedAccountId === null ? {} : { connectedAccountId: charge.connectedAccountId }),
+        idempotencyKey: rt.idempotencyKey(callId, charge.paymentId, "charge", charge.mode),
+        // The lease's end: a sender paused after the check above is told not to send past it.
+        notAfter: new Date(Date.parse(charge.requestedAt) + CHARGE_LEASE_MS).toISOString(),
+      }),
+    );
+  } catch {
+    // The answer was lost (a timeout, a dropped connection, a provider error): the card may or may
+    // not have been charged. Recorded so, and never sent again.
+    answer = "lost";
+  }
+  // What a readable answer settles the charge at, and the entry that says so.
+  const settled =
+    answer === "lost" || answer === "malformed"
+      ? null
+      : answer.outcome === "charged"
+        ? ({ status: "paid", providerRef: answer.providerRef, event: "payment.card_charged", detail: { paymentId: charge.paymentId, providerRef: answer.providerRef, amountMinor: charge.amountMinor, currency: charge.currency, mode: charge.mode } } as const)
+        : ({ status: "declined", providerRef: null, event: "payment.card_declined", detail: { paymentId: charge.paymentId, reason: declineCode(answer.reason) } } as const);
+  try {
+    return await rt.update(callId, (draft) => {
+      const c = draft.slice<PaylinkSlice>(PAYLINK).charges!.find((x) => x.paymentId === charge.paymentId)!;
+      // Only this process sends the charge, so it is still `charging`, or `unknown` when the call
+      // ended first (`settleChargesAtEnd`): an answer that comes after that is recorded, flagged late.
+      if (settled === null) {
+        if (c.status === "charging") {
+          c.status = "unknown";
+          c.settledAt = rt.now();
+          draft.emit("payment.card_unknown", "code", { paymentId: c.paymentId, reason: answer === "lost" ? "answer_lost" : "malformed_answer" });
+        }
+      } else {
+        const late = c.status !== "charging" ? { late: true } : {};
+        c.status = settled.status;
+        c.providerRef = settled.providerRef;
+        c.settledAt = rt.now();
+        draft.emit(settled.event, "code", { ...settled.detail, ...late });
+      }
+      return { paymentId: c.paymentId, status: c.status as SavedCardChargeAnswer["status"] };
+    });
+  } catch (error) {
+    // The host removed the ended call's record while this answer was on its way (the end had settled
+    // the charge unknown, so removeCall allowed it): the answer still reaches the ledger, flagged
+    // late, once per charge, and the host gets it. A lost answer adds nothing to `unknown`.
+    if (settled === null || !(error instanceof EngineError && error.code === "unknown_call")) throw error;
+    await rt.append({
+      eventId: JSON.stringify([rt.workspaceId, callId, settled.event, charge.paymentId]),
+      callId,
+      actor: "code",
+      event: settled.event,
+      at: rt.now(),
+      detail: { ...settled.detail, late: true },
+    });
+    return { paymentId: charge.paymentId, status: settled.status };
+  }
+}
+
+/**
+ * A saved-card adapter's answer, read once and checked: a charge with a provider id, or a decline
+ * with a string reason. Anything else does not establish what the provider did: "malformed",
+ * recorded as unknown, never as charged or declined.
+ */
+function readChargeAnswer(raw: unknown): SavedCardChargeResult | "malformed" {
+  if (!isObject(raw)) return "malformed";
+  const { outcome, providerRef, reason } = raw;
+  // A provider's id, as the ledger and the receipt carry it: letters, digits, `_` and `-` (never a lone surrogate), and never a card number.
+  if (outcome === "charged" && typeof providerRef === "string" && ACCOUNT_ID.test(providerRef) && !detailCarriesCardNumber(providerRef)) return { outcome, providerRef };
+  if (outcome === "declined" && typeof reason === "string") return { outcome, reason };
+  return "malformed";
+}
+
+/** A provider's decline reason as a short code for the ledger, never a card number; anything else becomes "declined". */
+function declineCode(reason: string): string {
+  return /^[a-z][a-z0-9_]{0,31}$/.test(reason) && !detailCarriesCardNumber(reason) ? reason : "declined";
+}
+
+/**
+ * In the write that ends a call: refuses (`precondition_failed`) while a saved-card charge has been
+ * waiting for its answer less than 60 seconds, so its answer is recorded before the receipt; a
+ * charge waiting longer is settled `unknown` (the process that sent it may have stopped). Nothing
+ * to do on a call that started with Paylink off, or made no charge.
+ */
+export function settleChargesAtEnd(rt: EngineRuntime, draft: CallDraft): void {
+  const slice = draft.record.modules[PAYLINK] as unknown as PaylinkSlice | undefined;
+  const now = rt.clock.now().getTime();
+  for (const c of slice?.charges ?? []) {
+    if (c.status !== "charging") continue;
+    if (now - Date.parse(c.requestedAt) < CHARGE_LEASE_MS) throw new EngineError("precondition_failed", "a saved card is being charged on this call; end the call once it answers");
+    c.status = "unknown";
+    c.settledAt = rt.now();
+    draft.emit("payment.card_unknown", "system", { paymentId: c.paymentId, reason: "no_answer_recorded" });
+  }
 }
 
 /** The key instruction after each channel's wording in the channel prompt, in every supported locale (SPEC.md section 16). */

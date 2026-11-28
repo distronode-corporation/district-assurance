@@ -8,10 +8,9 @@ import { readFileSync, readdirSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import { NotImplementedError } from "../src/core/errors.ts";
-import { chargeSavedCard, startKeypadCardCapture } from "../src/pay/later.ts";
+import { startKeypadCardCapture } from "../src/pay/later.ts";
 
 const STUBS: Array<[string, () => unknown]> = [
-  ["PAY-4", () => chargeSavedCard({ callId: "c", paymentId: "p" })],
   ["PAY-6", () => startKeypadCardCapture({ callId: "c", paymentId: "p" })],
 ];
 

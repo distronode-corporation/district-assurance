@@ -1185,6 +1185,16 @@ export class Engine {
     return paylink.requestPayment(this.#rt, callId, input);
   }
 
+  /**
+   * Charges the card the business already holds for the matched subject (PAY-4), for the amount the
+   * caller heard read back and confirmed: only with Paylink's `savedCardCharges` on, outside a flow,
+   * and a grant covering `payment.saved_card` (never below level 2). Sent once; a lost or unreadable
+   * answer is `unknown`, never charged, and no other payment is taken on the call after it.
+   */
+  chargeSavedCard(callId: string, input: paylink.PaymentInput): Promise<paylink.SavedCardChargeAnswer> {
+    return paylink.chargeSavedCard(this.#rt, callId, input);
+  }
+
   /** Expires a call's texted links that are still open past their deadline (Paylink's link life). */
   expirePaymentLinks(callId: string): Promise<{ expired: string[] }> {
     return paylink.expirePaymentLinks(this.#rt, callId);
@@ -1337,6 +1347,9 @@ export class Engine {
       // Likewise a payment link being texted: the call ends once its text is recorded, so no text
       // goes out after the call ended.
       paylink.assertNoSendInFlight(this.#rt, draft.record);
+      // Likewise a saved card being charged: the call ends once its answer is recorded, or, after
+      // its 60 seconds, with the charge settled unknown, before the receipt's ledger head is taken.
+      paylink.settleChargesAtEnd(this.#rt, draft);
       // The engine, not a module hook, drops Dossier's open draft, so its sensitive values never
       // outlive the call in the clear. It runs before call.ended and before the receipt's ledger
       // head is taken, and writes no event and no outcome.

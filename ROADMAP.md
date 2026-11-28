@@ -44,7 +44,7 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-29, says why.
 | M3 Gate and payment modes | The Gate module with signed access grants, the signed-webhook relay, Seam, Kisi and Verkada, one-time access codes, web sign-in step-up; Paylink's `connect` and `platform` modes, link life and instant methods. Open: the door adapters' runs against real vendor setups (code complete, tested against local fakes) | GAT-5 (#48), GAT-6 proof (#140) |
 | M4 Badge | Texted codes, spoken answers, carrier and Stripe Identity adapters, the adversarial suite, and the later Badge work (callback, caller ID attestation, the accessible path, duress PIN, risk-based step-up, synthetic voice, limits across flows, lockout alerts) | done |
 | M5 Dossier | Read-backs, encrypted fields, delivery, conditional fields, documents by text, Spanish | done |
-| M6 Paylink | Amounts from code, cancel and expiry, the live detector, refunds; the Stripe Checkout adapter in both modes, proven in Stripe test mode. Open: saved cards and keypad capture, gated | PAY-4, PAY-6 |
+| M6 Paylink | Amounts from code, cancel and expiry, the live detector, refunds; the Stripe Checkout adapter in both modes, proven in Stripe test mode; saved-card charges through an adapter, off by default. Open: keypad capture, gated | PAY-6 |
 | M7 Trace | Key rotation, the stand-alone verifier, consent revocation, ledger export, more redactors, subject requests, monthly reports, a public timestamp anchor, receipt links by text | done |
 | M8 Reference server hardening | Carrier signatures, limits and logs, receipt links, persistent stores, the release workflow, signed releases, fuzz tests, the threat tables, security.txt, benchmarks. Open: checking the first published release (0.1.0) | SRV-5 |
 | M9 Host integration and module authors | Transcript forwarding, event delivery, the module author kit, the FlowConfig JSON Schema, factors added after construction, the flow simulator, with a scripted caller for every built-in step | done |
@@ -59,8 +59,9 @@ and flows are config, not code. DECISIONS.md, ADR-13 to ADR-29, says why.
    also waits on its pricing and its handling of Canadian data being checked.
 3. **GAT-6 proof (#140):** one unlock and one refusal recorded from a real Kisi place and a real
    Verkada door, with the first host that uses each vendor.
-4. **Gated, not scheduled:** PAY-4 (saved-card charges) and PAY-6 (keypad card capture); PAY-6
-   starts only after an assessor's scoping and a buyer who needs it.
+4. **Gated, not scheduled:** PAY-6 (keypad card capture), which starts only after an assessor's
+   scoping and a buyer who needs it. PAY-4 (saved-card charges) is built behind its own switch, off
+   by default; no real provider adapter for it ships, so a host that turns it on brings its own.
 
 Dependencies: PAY-6 needed PAY-1, which is done.
 
@@ -177,22 +178,11 @@ mode before it goes live.
 | Live card-number detector (PAY-5) | `src/core/live-detector.ts`, `src/core/redaction.ts` | partial and spoken numbers over the shared corpus in `test/corpus/` (`test/redaction.test.ts`, `test/redaction-hostile.test.ts`) |
 | Refunds and disputes in platform mode (PAY-8) | `src/pay/refunds.ts` | `test/pay-refunds.test.ts`, `test/pay-refunds-hostile.test.ts` |
 | A refund's later outcome, a late failure after success included (PAY-9, #117, #132) | `src/pay/refunds.ts`, `src/webhooks/stripe.ts` | `test/pay-refund-updates.test.ts` |
+| Saved-card charges for level 2 callers, off by default (PAY-4) | `src/pay/paylink.ts`, `src/core/adapters.ts` | `chargeSavedCard` through the `savedCards` adapter only with `savedCardCharges` on, the `payment.saved_card` scope (never below level 2) and the caller's confirmed read-back; sent once, a lost answer `unknown` and never retried (`test/engine.test.ts`, `test/config.test.ts`); tested against `FakeSavedCards` only, with no real provider adapter |
 | Stripe Checkout in both modes (PAY-1) | `examples/reference-server/src/stripe-adapters.ts` | `StripeCheckoutLinks` against a local fake (`test/stripe-adapters.test.ts`); `npm run demo:e2e` with a real Checkout Session in test mode; runs recorded in Stripe test mode and replayed offline: a paid link in each mode settled by Stripe's signed event on its own endpoint, a direct charge on a connected account, a connect link expired on that account, and the wallet and Link mapping (`test/stripe-real.test.ts`) |
 
 **Proven by:** Unit tests at 100%; the Checkout adapter against a local fake, and in Stripe test
 mode in both modes (`npm run demo:e2e`, `test/stripe-real.test.ts`).
-
-#### **PAY-4** Saved-card charges for level 2 callers (gated)
-
-Charging a card the business already holds. Off by default, its own switch.
-
-*Acceptance*
-
-- `chargeSavedCard` through an adapter, only with a level 2 grant and a confirmed amount read-back; never enabled by default.
-
-*Files:* `src/pay/later.ts`, `src/pay/paylink.ts`  
-*Tests:* test/engine.test.ts  
-*Depends on:* PAY-2
 
 #### **PAY-6** Keypad card capture through a certified carrier service (gated)
 

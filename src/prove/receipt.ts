@@ -33,7 +33,11 @@ export interface ReceiptBody {
   /** The caller ID attestation the call started with. Optional, so the format stays version 1; never a method. */
   attestation?: Attestation;
   records: Array<{ recordId: string; formId: string; digest: string }>;
-  payments: Array<{ paymentId: string; status: string; amountMinor: number; currency: string; mode: string; providerRef: string }>;
+  /**
+   * Every payment of the call: its links, then its saved-card charges (PAY-4), which carry
+   * `method: "saved_card"`. The field is absent on a link, so the format stays at `v: 1`.
+   */
+  payments: Array<{ paymentId: string; status: string; amountMinor: number; currency: string; mode: string; providerRef: string; method?: "saved_card" }>;
   consents: Array<{ purpose: string; wordingVersion: string; wordingDigest: string; answer: "yes" | "no" | "not_recorded" }>;
   /**
    * The call's web sign-in step-up tokens as the call ended: `issued` ones may still be exchanged
