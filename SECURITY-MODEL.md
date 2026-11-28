@@ -808,8 +808,9 @@ answer is `unknown`, never charged, and while a charge is unknown or waiting no 
 payment link is taken on the call, so a lost answer cannot become a second charge (tested). The
 end of the call is refused (`precondition_failed`) while a charge has waited less than 60 seconds
 for its answer, counted from its reservation, so the host ends the call again once it answers or
-that time has passed; then the end settles the charge unknown before the receipt's head, and an
-answer that comes later is still recorded, flagged late (tested). A charge is
+that time has passed; a charge still unanswered then is settled unknown before the receipt's head
+(one answered meanwhile keeps its answer), and an answer that comes after that is still recorded,
+flagged late (tested). A charge is
 read again right before it is sent, and one whose 60 seconds ran out first (a slow ledger held its
 reservation's write) is never sent and is recorded `not_sent`, so no charge reaches the provider
 after the end of the call settled it (tested). A provider id the ledger cannot carry (a lone

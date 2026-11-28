@@ -2379,8 +2379,9 @@ card number, else `declined`); a throw is
   (the payment id and the idempotency key name it there). A `declined` charge is settled: the caller
   can pay another way.
 - `endCall` is refused (`precondition_failed`) while a charge has waited less than 60 seconds for
-  its answer; after that, the end settles it `unknown` (`payment.card_unknown`, `no_answer_recorded`,
-  actor `system`) before `call.ended` and the receipt's head. An answer that arrives later is still
+  its answer; after that, a charge still unanswered is settled `unknown` (`payment.card_unknown`,
+  `no_answer_recorded`, actor `system`) before `call.ended` and the receipt's head, and one
+  answered meanwhile keeps its answer. An answer that arrives later is still
   recorded, as `paid` or `declined` with `late: true`; the receipt already signed is not changed.
 - The receipt lists each charge in `payments` with `method: "saved_card"` (section 12), its status
   as the end of the call left it. Refunds,
