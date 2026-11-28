@@ -578,6 +578,27 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     assert.equal(check.shortHash("a".repeat(20)), "a".repeat(20));
     assert.equal(check.shortHash("a".repeat(21)), "aaaaaaaa...aaaaaaaa");
   });
+
+  it("decodes base64url back to the same bytes, for any bytes", () => {
+    fc.assert(
+      fc.property(fc.uint8Array(), (bytes) => {
+        assert.deepEqual(check.base64urlToBytes(Buffer.from(bytes).toString("base64url")), bytes);
+      }),
+    );
+  });
+
+  it("refuses any text holding a character outside base64url's alphabet", () => {
+    // Any UTF-16 code unit, lone surrogates included (fast-check's "binary" unit draws whole code points).
+    const outside = fc
+      .integer({ min: 0, max: 0xffff })
+      .map((n) => String.fromCharCode(n))
+      .filter((c) => !/^[A-Za-z0-9_-]$/.test(c));
+    fc.assert(
+      fc.property(fc.string(), outside, fc.string(), (prefix, bad, suffix) => {
+        assert.throws(() => check.base64urlToBytes(prefix + bad + suffix), TypeError);
+      }),
+    );
+  });
 });
 
 describe("reference UI: the demo world's adapters and clock (review of #50)", () => {
