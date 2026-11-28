@@ -37,10 +37,12 @@ check before an owner's command to full verification with a payment during the c
 caller let in through a door. A small reference server and a scripted demo let you try it end to
 end on your own machine.
 
-> **Status: pre-alpha.** Published to npm as `district-assurance` from 0.1.0 on. The API will
-> change, and before 1.0 a minor version may break it. Nothing here is certified: no PCI DSS
-> attestation, no SOC 2 report, no regulated identity proofing. Do not put it in front of real
-> callers.
+> **Status: 1.0, a stable API.** Published to npm as `district-assurance`. From 1.0.0 on it
+> follows Semantic Versioning: a breaking change to the public API comes only in a new major
+> version ([What 1.0 promises](#what-10-promises)). Distronode runs it on real calls in District
+> AI. Nothing here is certified: no PCI DSS attestation, no SOC 2 report, no regulated identity
+> proofing. If you put it in front of your own callers, that is your decision, on your own review
+> of [SECURITY-MODEL.md](SECURITY-MODEL.md) and what it leaves to the host.
 
 ## Quick start
 
@@ -387,6 +389,35 @@ server's optional SQLite stores. No configuration UI.
 No regulated identity proofing: it checks a caller against the organisation's own records.
 
 ## Releases
+
+### What 1.0 promises
+
+From 1.0.0 on, versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). These
+are the public API, and a change that breaks any of them comes only in a new major version:
+
+- The exports of the four entry points, `district-assurance`, `district-assurance/testing`,
+  `district-assurance/stripe` and `district-assurance/carrier`, with their types, and the package's
+  export map. `test/public-api.test.ts` pins the names.
+- FlowConfig version 1 and its JSON Schema, `district-assurance/schema/flow-config.v1.json`: a
+  config that is valid under 1.0.0 stays valid in every 1.x (but see the exception below).
+- What the engine signs or writes for others to check: receipts (version 1), the ledger's entries
+  and hash chain, ledger checkpoints and exports, monthly reports and subject exports, with their
+  signatures, so a 1.x verifier checks what any 1.x engine wrote.
+- The names of ledger events (`ENGINE_EVENTS`) and the codes of config problems.
+- The `district-assurance simulate` command's arguments and exit codes.
+- The supported Node.js versions: raising the minimum (24.19 today) is a major change.
+
+A minor version may add to any of these: new exports, optional config settings, steps, event
+names and problem codes. A patch version only fixes. The one exception: a fix for a security flaw
+may refuse a config or an input that was accepted before (as 0.4.2 did for a number field holding
+a card number), and CHANGELOG.md says so. Not covered:
+
+- A function that throws `NotImplementedError` (today `chargeSavedCard` and
+  `startKeypadCardCapture`) is a placeholder: building it in a minor version may change its shape.
+- The Stripe API version the Stripe adapters send (`STRIPE_API_VERSION`) may move in a minor
+  version when Stripe's own changes call for it, with a line in CHANGELOG.md.
+- Anything not exported (a deep import into `dist/`), the reference server and the examples, which
+  are not in the package, and the wording of messages, logs and spoken text.
 
 ### How releases work
 

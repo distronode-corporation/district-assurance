@@ -15,6 +15,30 @@ released out of this file, from its dated `## [X.Y.Z] - YYYY-MM-DD` heading to t
 heading, and uses it as the GitHub release's text, with a link back here
 (`scripts/release-notes.mjs`). A release with no dated section is refused.
 
+## [1.0.0] - 2026-11-28
+
+district-assurance 1.0.0 is 0.4.2's engine with a stable API. Nothing was removed or renamed, so a
+host on 0.4.2 upgrades without changing anything. From this version on, versions follow Semantic
+Versioning: what the API covers, and what it leaves out, is in README.md under "What 1.0
+promises" (ADR-39). Nothing here is certified: no PCI DSS attestation, no SOC 2 report, no
+regulated identity proofing.
+
+### Changed
+
+- **A stable public API.** The exports of `district-assurance`, `district-assurance/testing`,
+  `district-assurance/stripe` and `district-assurance/carrier`, FlowConfig version 1 and its
+  schema, the signed formats (receipts, the ledger, checkpoints, exports and reports), ledger
+  event names, config problem codes and the simulator's exit codes change in a breaking way only
+  in a new major version. A new test pins every exported name, so removing one fails CI.
+  Placeholders that throw `NotImplementedError` and the Stripe API version the adapters send are
+  not covered, and a fix for a security flaw may still refuse what was accepted before.
+- **Status.** The README, SPEC.md, SECURITY-MODEL.md and the support page no longer call the
+  project pre-alpha, and the README says that Distronode runs it on real calls in District AI.
+  SECURITY.md supports 1.x; 0.x users upgrade to 1.x, which breaks nothing 0.4.2 offered.
+- **The roadmap's release item is closed.** Every version from 0.1.0 on was published by the
+  release workflow, and each one's npm provenance and SBOM attestation verify against this
+  repository.
+
 ## [0.4.2] - 2026-11-26
 
 Two fixes to how card numbers are kept out of what the engine stores. Nothing changes for a host

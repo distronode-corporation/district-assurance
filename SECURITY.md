@@ -41,11 +41,11 @@ osv-scanner on the lockfile) and handled by updating the dependency.
 
 | Version | Supported |
 |---|---|
-| 0.3.x (pre-alpha) | Best effort |
-| Earlier | No |
+| 1.x | Yes |
+| 0.x | No: upgrade to 1.x, which breaks nothing that 0.4.2 offered |
 
 From 0.1.0 on, releases are published to npm as `district-assurance` with npm provenance. Fixes
-land in the latest 0.3.x release; reports against `main` are welcome too.
+land in the latest 1.x release; reports against `main` are welcome too.
 
 ## Security model
 
