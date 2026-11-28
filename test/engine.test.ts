@@ -20,7 +20,7 @@ import { intakeDigest, type IntakeForm } from "../src/file/intake.ts";
 import { defaultConfig } from "../src/modules.ts";
 import { formatAmount, SAVED_CARD_SCOPE } from "../src/pay/paylink.ts";
 import { MemoryAuditLedger, verifyChain } from "../src/prove/ledger.ts";
-import { verifyReceipt } from "../src/prove/receipt.ts";
+import { verifyReceipt, type SignedReceipt } from "../src/prove/receipt.ts";
 import { isStopRequest } from "../src/prove/consent.ts";
 import { FakeCarrierSignals, FakeFieldCipher, FakeIdentityProvider, FakeMessageSender, FakePaymentLinks, MemoryAttemptCounters, MemoryConsentStore, MemoryRecordStore, generateTestSigner } from "../src/testing/fakes.ts";
 import { TEST_KNOWLEDGE_KEY, auditLedgerContract, createTestEngine, sessionStoreContract, type TestEngine } from "../src/testing/index.ts";
@@ -1449,6 +1449,7 @@ describe("Engine pay: saved-card charges (PAY-4)", () => {
         description: "Deposit",
         mode: "platform",
         idempotencyKey: JSON.stringify(["ws_test", callId, "pay_1", "charge", "platform"]),
+        notAfter: new Date(t.clock.now().getTime() + 60_000).toISOString(),
       },
     ]);
     assert.deepEqual(await events(t), [
@@ -1673,6 +1674,32 @@ describe("Engine pay: saved-card charges (PAY-4)", () => {
         assert.deepEqual((await t.engine.endCall(callId))!.body.payments.map((p) => p.status), ["not_sent", "paid"]);
       }
     }
+  });
+
+  it("tells the adapter its deadline, so a sender paused after the check is not sent past it, and records its answer late", async () => {
+    // The sender passed the check, then stalled before its request: meanwhile the call's 60 seconds
+    // ran out and another process ended the call, settling the charge unknown on the receipt. An
+    // adapter that honours notAfter then refuses to send, and that answer is recorded, flagged late.
+    let t!: TestEngine;
+    let receipt: SignedReceipt | null = null;
+    t = charging({
+      savedCards: {
+        capabilities: { modes: ["platform"] },
+        charge: async (input) => {
+          t.clock.advance(60_000);
+          receipt = await t.engine.endCall(input.callId);
+          return Date.parse(input.notAfter) <= t.clock.now().getTime() ? { outcome: "declined", reason: "not_after" } : { outcome: "charged", providerRef: "pi_late" };
+        },
+      },
+    });
+    const callId = await callAt(t, 2);
+    await confirmAmount(t.engine, callId, request);
+    assert.deepEqual(await t.engine.chargeSavedCard(callId, request), { paymentId: "pay_1", status: "declined" });
+    assert.equal(receipt!.body.payments[0]!.status, "unknown", "the receipt says unknown: never that nothing was charged");
+    assert.deepEqual((await events(t)).slice(-2), [
+      ["payment.card_unknown", "system", { paymentId: "pay_1", reason: "no_answer_recorded" }],
+      ["payment.card_declined", "code", { paymentId: "pay_1", reason: "not_after", late: true }],
+    ]);
   });
 
   it("ends the call only once a charge answers, or after its 60 seconds with the charge unknown, and records a later answer flagged late", async () => {

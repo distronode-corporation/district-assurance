@@ -812,8 +812,12 @@ that time has passed; a charge still unanswered then is settled unknown before t
 (one answered meanwhile keeps its answer), and an answer that comes after that is still recorded,
 flagged late (tested). A charge is
 read again right before it is sent, and one whose 60 seconds ran out first (a slow ledger held its
-reservation's write) is never sent and is recorded `not_sent`, so no charge reaches the provider
-after the end of the call settled it (tested). A provider id the ledger cannot carry (a lone
+reservation's write) is never sent and is recorded `not_sent`, and the adapter is told the same
+deadline (`notAfter`), past which it answers `declined` without sending (tested). That narrows,
+and does not close, the window after the end of the call settled a charge unknown: a sender paused
+after the check, an adapter that ignores `notAfter`, or a request slow to reach the provider can
+still charge, so `unknown` never means not charged, the late answer is recorded, flagged late
+(tested), and the host settles unknown charges with its provider. A provider id the ledger cannot carry (a lone
 surrogate, a card number) is read as an unreadable answer, `unknown` (tested). Ledger entries
 carry the payment id, the amount, the mode, the provider's charge id and a decline reason only when
 it is a short code that is not a card number, never card data (tested). Left to the host: a real `savedCards` adapter (none

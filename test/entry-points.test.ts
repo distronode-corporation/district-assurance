@@ -142,7 +142,7 @@ describe("fakes", () => {
     const cards = new testing.FakeSavedCards({ modes: ["platform"] });
     assert.deepEqual(cards.capabilities, { modes: ["platform"] });
     assert.deepEqual(new testing.FakeSavedCards().capabilities, { modes: ["connect", "platform"] });
-    const input = { callId: "c", paymentId: "p", subjectKey: "a".repeat(64), amountMinor: 1, currency: "cad", description: "d", mode: "platform" as const, idempotencyKey: "k" };
+    const input = { callId: "c", paymentId: "p", subjectKey: "a".repeat(64), amountMinor: 1, currency: "cad", description: "d", mode: "platform" as const, idempotencyKey: "k", notAfter: "2026-01-01T00:01:00.000Z" };
     const first = await cards.charge(input);
     assert.deepEqual(first, { outcome: "charged", providerRef: "pi_fake_1" });
     assert.deepEqual(await cards.charge(input), first, "a repeated key gives the first answer back");

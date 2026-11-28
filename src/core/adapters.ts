@@ -233,6 +233,14 @@ export interface SavedCardChargeRequest {
   connectedAccountId?: string;
   /** One per charge, derived by the engine: the provider must charge at most once per key. */
   idempotencyKey: string;
+  /**
+   * The latest the adapter may send the charge to the provider (ISO 8601): 60 seconds after the
+   * engine reserved it, when the end of the call may settle it unknown. An adapter checks it right
+   * before its request and, past it, answers `declined` (reason `not_after`) without sending. A
+   * request already on its way to the provider is the provider's: the engine records its answer
+   * whenever it comes.
+   */
+  notAfter: string;
 }
 
 /**

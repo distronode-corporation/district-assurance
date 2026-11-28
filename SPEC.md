@@ -2358,15 +2358,22 @@ step-up rules on amounts apply (section 4).
   checked again against Paylink's `maxAmountMinor` in force. The read-back is used up by the charge.
 - The charge is reserved in one write (`payment.card_charge_requested`, a `paymentId` from the
   engine's ids), then `SavedCards.charge({callId, paymentId, subjectKey, amountMinor, currency,
-  description, mode, connectedAccountId?, idempotencyKey})` is called once, with the key
-  `[workspaceId, callId, paymentId, "charge", mode]` and `connectedAccountId` exactly in connect
-  mode (from Paylink's settings), and its answer is committed in another write. It is never
+  description, mode, connectedAccountId?, idempotencyKey, notAfter})` is called once, with the key
+  `[workspaceId, callId, paymentId, "charge", mode]`, `connectedAccountId` exactly in connect mode
+  (from Paylink's settings) and `notAfter` 60 seconds after the reservation, and its answer is
+  committed in another write. An adapter checks `notAfter` right before its request and, past it,
+  answers `declined` (reason `not_after`) without sending; a request already on its way is the
+  provider's. It is never
   retried. Right before the send, with nothing awaited in between, the charge is read again: one
   that is no longer waiting (the end of the call settled it) or whose 60 seconds since the
   reservation ran out (its write can wait on a slow ledger) is never sent. It is recorded
   `not_sent` (`payment.card_not_sent`, `late: true` when the end had settled it unknown) and
   `chargeSavedCard` throws `precondition_failed`; nothing was charged, so the caller can pay another
-  way. `{outcome: "charged", providerRef}` with a `providerRef` of 1 to 255 letters, digits, `_` or
+  way. The check runs once: a sender paused after it (or an adapter that does not honour
+  `notAfter`, or a request slow to reach the provider) can still charge after the end of the call
+  settled the charge `unknown`. That is why the receipt says `unknown`, never that nothing was
+  charged, and its answer is recorded whenever it comes, flagged late; the business settles an
+  unknown charge with its provider. `{outcome: "charged", providerRef}` with a `providerRef` of 1 to 255 letters, digits, `_` or
   `-` that is not a card number is `paid`
   (`payment.card_charged`); `{outcome: "declined", reason}` with a string reason is `declined`
   (`payment.card_declined`, the reason kept only when it is a short snake_case code that is not a

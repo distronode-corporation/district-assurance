@@ -1326,6 +1326,8 @@ export async function chargeSavedCard(rt: EngineRuntime, callId: string, given: 
         mode: charge.mode,
         ...(charge.connectedAccountId === null ? {} : { connectedAccountId: charge.connectedAccountId }),
         idempotencyKey: rt.idempotencyKey(callId, charge.paymentId, "charge", charge.mode),
+        // The lease's end: a sender paused after the check above is told not to send past it.
+        notAfter: new Date(Date.parse(charge.requestedAt) + CHARGE_LEASE_MS).toISOString(),
       }),
     );
   } catch {
