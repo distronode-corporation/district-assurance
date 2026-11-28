@@ -11,6 +11,8 @@ import { request } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, describe, it, mock } from "node:test";
 
+import fc from "fast-check";
+
 import { createReferenceServer } from "../examples/reference-server/src/app.ts";
 import { DemoRuns, type RunView } from "../examples/reference-server/src/demo-runs.ts";
 import {
@@ -569,6 +571,23 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
     assert.equal(await check.sha256Hex(""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
     assert.equal(check.shortHash("a".repeat(64)), "aaaaaaaa...aaaaaaaa");
     assert.equal(check.shortHash("abc"), "abc");
+  });
+
+  it("decodes base64url back to the same bytes, for any bytes", () => {
+    fc.assert(
+      fc.property(fc.uint8Array(), (bytes) => {
+        assert.deepEqual(check.base64urlToBytes(Buffer.from(bytes).toString("base64url")), bytes);
+      }),
+    );
+  });
+
+  it("refuses any text holding a character outside base64url's alphabet", () => {
+    const outside = fc.string({ unit: "binary", minLength: 1, maxLength: 1 }).filter((c) => !/^[A-Za-z0-9_-]$/.test(c));
+    fc.assert(
+      fc.property(fc.string(), outside, fc.string(), (prefix, bad, suffix) => {
+        assert.throws(() => check.base64urlToBytes(prefix + bad + suffix), TypeError);
+      }),
+    );
   });
 });
 
