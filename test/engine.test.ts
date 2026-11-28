@@ -1605,7 +1605,12 @@ describe("Engine pay: saved-card charges (PAY-4)", () => {
       assert.equal((await t.engine.chargeSavedCard(callId, request)).status, "unknown", JSON.stringify(answer));
       assert.deepEqual((await events(t)).at(-1)![2], { paymentId: "pay_1", reason: "malformed_answer" });
     }
-    for (const [reason, code] of [["insufficient_funds", "insufficient_funds"], ["Card was declined: 4111 1111 1111 1111", "declined"]] as const) {
+    for (const [reason, code] of [
+      ["insufficient_funds", "insufficient_funds"],
+      ["Card was declined: 4111 1111 1111 1111", "declined"],
+      // A short code that carries a card number: the ledger would refuse it, so it is never kept.
+      ["card_4111111111111111", "declined"],
+    ] as const) {
       const t = charging({ savedCards: { capabilities: { modes: ["platform"] }, charge: async () => ({ outcome: "declined", reason }) } });
       const callId = await callAt(t, 2);
       await confirmAmount(t.engine, callId, request);

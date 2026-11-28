@@ -2369,7 +2369,8 @@ step-up rules on amounts apply (section 4).
   way. `{outcome: "charged", providerRef}` with a `providerRef` of 1 to 255 letters, digits, `_` or
   `-` that is not a card number is `paid`
   (`payment.card_charged`); `{outcome: "declined", reason}` with a string reason is `declined`
-  (`payment.card_declined`, the reason kept only when it is a short snake_case code); a throw is
+  (`payment.card_declined`, the reason kept only when it is a short snake_case code that is not a
+card number, else `declined`); a throw is
   `unknown` (`payment.card_unknown`, `answer_lost`), and so is any other answer (`malformed_answer`),
   never charged. `chargeSavedCard` returns `{paymentId, status}`.
 - While a charge of the call is waiting for its answer or `unknown`, every further

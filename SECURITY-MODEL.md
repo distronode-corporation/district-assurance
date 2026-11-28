@@ -806,14 +806,16 @@ given the subject key, the amount and an idempotency key the engine derives, and
 the business's provider (tested). A charge is sent once and never retried; a lost or unreadable
 answer is `unknown`, never charged, and while a charge is unknown or waiting no other charge or
 payment link is taken on the call, so a lost answer cannot become a second charge (tested). The
-end of the call waits 60 seconds for an answer, then settles the charge unknown before the
-receipt's head; an answer that comes later is still recorded, flagged late (tested). A charge is
+end of the call is refused (`precondition_failed`) while a charge has waited less than 60 seconds
+for its answer, counted from its reservation, so the host ends the call again once it answers or
+that time has passed; then the end settles the charge unknown before the receipt's head, and an
+answer that comes later is still recorded, flagged late (tested). A charge is
 read again right before it is sent, and one whose 60 seconds ran out first (a slow ledger held its
 reservation's write) is never sent and is recorded `not_sent`, so no charge reaches the provider
 after the end of the call settled it (tested). A provider id the ledger cannot carry (a lone
 surrogate, a card number) is read as an unreadable answer, `unknown` (tested). Ledger entries
 carry the payment id, the amount, the mode, the provider's charge id and a decline reason only when
-it is a short code, never card data (tested). Left to the host: a real `savedCards` adapter (none
+it is a short code that is not a card number, never card data (tested). Left to the host: a real `savedCards` adapter (none
 ships), the customer's agreement to keep and charge the card, and settling an unknown charge with
 the provider.
 

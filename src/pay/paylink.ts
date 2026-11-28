@@ -1372,9 +1372,9 @@ function readChargeAnswer(raw: unknown): SavedCardChargeResult | "malformed" {
   return "malformed";
 }
 
-/** A provider's decline reason as a short code for the ledger; anything else becomes "declined". */
+/** A provider's decline reason as a short code for the ledger, never a card number; anything else becomes "declined". */
 function declineCode(reason: string): string {
-  return /^[a-z][a-z0-9_]{0,31}$/.test(reason) ? reason : "declined";
+  return /^[a-z][a-z0-9_]{0,31}$/.test(reason) && !detailCarriesCardNumber(reason) ? reason : "declined";
 }
 
 /**
