@@ -582,7 +582,11 @@ describe("reference UI: the page's checks (receipt-check.js, no DOM)", () => {
   });
 
   it("refuses any text holding a character outside base64url's alphabet", () => {
-    const outside = fc.string({ unit: "binary", minLength: 1, maxLength: 1 }).filter((c) => !/^[A-Za-z0-9_-]$/.test(c));
+    // Any UTF-16 code unit, lone surrogates included (fast-check's "binary" unit draws whole code points).
+    const outside = fc
+      .integer({ min: 0, max: 0xffff })
+      .map((n) => String.fromCharCode(n))
+      .filter((c) => !/^[A-Za-z0-9_-]$/.test(c));
     fc.assert(
       fc.property(fc.string(), outside, fc.string(), (prefix, bad, suffix) => {
         assert.throws(() => check.base64urlToBytes(prefix + bad + suffix), TypeError);
